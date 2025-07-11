@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import cProfile
 from typing import IO, Any, BinaryIO
 from collections.abc import Iterable
 from jaxtyping import Float, Int
@@ -8,7 +9,7 @@ from jaxtyping import Float, Int
 import numpy.typing as npt
 import torch
 from torch import Tensor
-
+from cs336_basics.train_bpe import train_bpe
 
 
 def run_linear(
@@ -588,4 +589,4 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    return train_bpe(input_path, vocab_size, special_tokens, **kwargs)
