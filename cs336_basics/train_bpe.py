@@ -1,10 +1,12 @@
 import os
 import regex as re
-import heapq
-
+import logging
+from tqdm import tqdm
 from typing import BinaryIO
 from collections import Counter, defaultdict
 from multiprocessing import Pool
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 def train_bpe(
@@ -18,7 +20,6 @@ def train_bpe(
     tokenizer_vocabs = dict()
     merges = list()
     num_processes = kwargs.get("num_processes", os.cpu_count())
-#     num_processes = 1
     
     # Initialize the vocabularies 
     # Append special tokens 
@@ -50,36 +51,61 @@ def train_bpe(
     for pre_token, _ in pre_tokens.items():
         for i in range(len(pre_token)):
             pre_token_sequences[pre_token].append(bytes([pre_token[i]]))
+    
+    # Initialize the pair frequences
+    pair_freq = Counter()
+    token_ocurrences = defaultdict(set)
+    for pre_token, seq in pre_token_sequences.items():
+        for i in range(len(seq) - 1):
+            pair = (seq[i], seq[i + 1])
+            pair_freq[pair] += pre_tokens[pre_token]
+            token_ocurrences[seq[i]].add(pre_token)
+            token_ocurrences[seq[i + 1]].add(pre_token)
             
+    total_iterations = vocab_size - len(tokenizer_vocabs.keys())
+    pbar = tqdm(total=total_iterations, desc="Merging", ncols=70)
     while len(tokenizer_vocabs.keys()) < vocab_size:
-        # Count adjacent pairs
-        pair_freq = Counter()
-        for pre_token, seq in pre_token_sequences.items():
-            for i in range(len(seq) - 1):
-                pair = (seq[i], seq[i + 1])
-                pair_freq[pair] += pre_tokens[pre_token]
-        # Find the pair with highest frequency to create new token sequences
         if len(pair_freq) == 0:
             break
-            
+        # Find the pair with highest frequency to create new token sequences
         max_count = max(pair_freq.values())
         most_frequent = max([k for k, v in pair_freq.items() if v == max_count])
-
+        
+        # Append the new merge
+        merges.append(most_frequent)
+        
         # Add the new token in the tokenizer vocabularies 
-        tokenizer_vocabs[len(tokenizer_vocabs)] = most_frequent[0] + most_frequent[1]
-        # Merge the new pair to update the token sequences
-        new_pre_token_sequences = defaultdict(list)
-        for pre_token, seq in pre_token_sequences.items():
+        new_token = most_frequent[0] + most_frequent[1]
+        tokenizer_vocabs[len(tokenizer_vocabs)] = new_token
+        
+        # Set the frequencies of the merged pair tokens to 0
+        pair_freq[most_frequent] = 0
+        
+        # Update the token sequences of the impacted pre tokens 
+        impacted_pre_tokens = token_ocurrences[most_frequent[0]] | token_ocurrences[most_frequent[1]]
+        for pre_token in impacted_pre_tokens:
+            seq = pre_token_sequences[pre_token]
+            # Rebuild the pre-token sequences for the impacted pre-token
             i = 0
+            new_seq = list()
             while i < len(seq):
                 if i < len(seq) - 1 and (seq[i], seq[i + 1]) == most_frequent:
-                    new_pre_token_sequences[pre_token].append(seq[i] + seq[i + 1])
+                    new_seq.append(new_token)
+                    token_ocurrences[new_token].add(pre_token)
+                    if i - 1 >= 0:
+                        pair_freq[(seq[i - 1], seq[i])] -= pre_tokens[pre_token]
+                        pair_freq[(seq[i - 1], new_token)] += pre_tokens[pre_token]
+                    if i + 2 < len(seq):
+                        pair_freq[(seq[i + 1], seq[i + 2])] -= pre_tokens[pre_token]
+                        pair_freq[(new_token, seq[i + 2])] += pre_tokens[pre_token]
                     i += 2
                 else:
-                    new_pre_token_sequences[pre_token].append(seq[i])
+                    new_seq.append(seq[i])
                     i += 1
-        pre_token_sequences = new_pre_token_sequences
-        merges.append(most_frequent)
+            pre_token_sequences[pre_token] = new_seq
+        
+        pbar.update(1)
+    pbar.close()
 
     return tokenizer_vocabs, merges
 
