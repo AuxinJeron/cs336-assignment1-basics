@@ -31,6 +31,7 @@ def train_bpe(
   
     # Pre-tokenizations
     pre_tokens = dict()
+    logging.info("Chunking...")
     with open(input_path, "rb") as f:
         split_special_token = special_tokens[0] if special_tokens else "<|endoftext|>"
         boundaries = find_chunk_boundaries(
@@ -39,6 +40,7 @@ def train_bpe(
     # Prepare list of (input_path, start, end) arguments
     chunk_args = [(input_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
     # Use multiprocessing.Pool
+    logging.info("Pre-tokenization...")
     with Pool(processes=num_processes) as pool:
         chunk_counters = pool.starmap(process_chunk_for_bpe, chunk_args)
         
