@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import os
 import cProfile
-from typing import IO, Any, BinaryIO
+import math
+from typing import IO, Any, BinaryIO, Tuple
 from collections.abc import Iterable
 from jaxtyping import Float, Int
 
 import numpy.typing as npt
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from cs336_basics.train_bpe import train_bpe
 from cs336_basics.bpe_tokenizer import Tokenizer
-from cs336_basics.run_linear import Linear
-from cs336_basics.run_embedding import Embedding
-from cs336_basics.run_rmsnorm import RMSNorm
-from cs336_basics.run_swiglu import SwiGLU
-from cs336_basics.run_rope import RoPE
-from cs336_basics.run_scaled_dot_production_attention import scaled_dot_product_attention
-from cs336_basics.run_multihead_self_attention import CausalMultiHeadSelfAttention
+from cs336_basics.llm_transformer import (
+    Linear,
+    Embedding,
+    RMSNorm,
+    SwiGLU,
+    RoPE,
+    scaled_dot_product_attention,
+    CausalMultiHeadSelfAttention,
+    TransformerBlock, 
+    TransformerLM
+)
 
 
 def run_linear(
@@ -334,7 +340,39 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    batch_size, seq_length, _ = in_features.shape
+    token_positions = torch.arange(seq_length)
+    
+    rope = RoPE(theta, d_model // num_heads, max_seq_len)
+    transformer_block = TransformerBlock(d_model, num_heads, d_ff, rope=rope)
+    transformer_block.multi_head_self_attention.linear_q.load_state_dict({
+        "weights": weights["attn.q_proj.weight"]
+    })
+    transformer_block.multi_head_self_attention.linear_k.load_state_dict({
+        "weights": weights["attn.k_proj.weight"]
+    })
+    transformer_block.multi_head_self_attention.linear_v.load_state_dict({
+        "weights": weights["attn.v_proj.weight"]
+    })
+    transformer_block.multi_head_self_attention.linear_o.load_state_dict({
+        "weights": weights["attn.output_proj.weight"]
+    })
+    transformer_block.rms_norm_1.load_state_dict({
+        "scale": weights["ln1.weight"]
+    })
+    transformer_block.feed_forward.linear_1.load_state_dict({
+        "weights": weights["ffn.w1.weight"]
+    })
+    transformer_block.feed_forward.linear_3.load_state_dict({
+        "weights": weights["ffn.w2.weight"]
+    })
+    transformer_block.feed_forward.linear_2.load_state_dict({
+        "weights": weights["ffn.w3.weight"]
+    })
+    transformer_block.rms_norm_2.load_state_dict({
+        "scale": weights["ln2.weight"]
+    })
+    return transformer_block(in_features, token_positions)
 
 
 def run_transformer_lm(
@@ -416,7 +454,49 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    transformer_lm = TransformerLM(vocab_size, context_length, num_layers, d_model, num_heads, d_ff, rope_theta)
+    transformer_lm.embedding.load_state_dict({
+        "embeddings": weights["token_embeddings.weight"]
+    })
+    for i in range(num_layers):
+        transformer_lm.transformer_blocks[i].multi_head_self_attention.linear_q.load_state_dict({
+            "weights": weights[f"layers.{i}.attn.q_proj.weight"]
+        })
+        transformer_lm.transformer_blocks[i].multi_head_self_attention.linear_k.load_state_dict({
+            "weights": weights[f"layers.{i}.attn.k_proj.weight"]
+        })
+        transformer_lm.transformer_blocks[i].multi_head_self_attention.linear_v.load_state_dict({
+            "weights": weights[f"layers.{i}.attn.v_proj.weight"]
+        })
+        transformer_lm.transformer_blocks[i].multi_head_self_attention.linear_o.load_state_dict({
+            "weights": weights[f"layers.{i}.attn.output_proj.weight"]
+        })
+        transformer_lm.transformer_blocks[i].rms_norm_1.load_state_dict({
+            "scale": weights[f"layers.{i}.ln1.weight"]
+        })
+        transformer_lm.transformer_blocks[i].feed_forward.linear_1.load_state_dict({
+            "weights": weights[f"layers.{i}.ffn.w1.weight"]
+        })
+        transformer_lm.transformer_blocks[i].feed_forward.linear_3.load_state_dict({
+            "weights": weights[f"layers.{i}.ffn.w2.weight"]
+        })
+        transformer_lm.transformer_blocks[i].feed_forward.linear_2.load_state_dict({
+            "weights": weights[f"layers.{i}.ffn.w3.weight"]
+        })
+        transformer_lm.transformer_blocks[i].rms_norm_2.load_state_dict({
+            "scale": weights[f"layers.{i}.ln2.weight"]
+        })
+    transformer_lm.norm.load_state_dict({
+        "scale": weights["ln_final.weight"]
+    })
+    transformer_lm.linear.load_state_dict({
+        "weights": weights["lm_head.weight"]
+    })
+    batch, seq_len = in_indices.shape
+    token_positions = torch.arange(seq_len)
+    # (batch, seq_len, vocab_size)
+    res = transformer_lm(in_indices, token_positions)
+    return res
 
 
 def run_rmsnorm(
@@ -513,7 +593,13 @@ def run_cross_entropy(inputs: Float[Tensor, " batch_size vocab_size"], targets: 
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    largest = torch.max(inputs, dim=-1, keepdim=True).values
+    stable_inputs = inputs - largest
+    # (batch, vocab_size)
+    log_probs = -1 * F.log_softmax(inputs, dim=-1)
+    target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+    return target_log_probs.mean()
+    
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -532,8 +618,69 @@ def get_adamw_cls() -> type[torch.optim.Optimizer]:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    class AdamW(torch.optim.Optimizer):
+        # Reference: https://medium.com/@yehyafarhat_3213/how-to-build-your-own-custom-optimizer-in-pytorch-step-by-step-58fbe987cfae
+        def __init__(self, params: Iterable[torch.nn.Parameter], lr: float=0.01, betas: Tuple[float, float]=(0.9, 0.999), eps: float=1e-8, weight_decay: float=0):
+            
+            if lr <= 0.0:
+                raise ValueError(f"Invalid learning rate: {lr}")
+            if eps <= 0.0:
+                raise ValueError(f"eps needs to be a positive value: {eps}")
+                
+            defaults = dict(
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=weight_decay
+            )
+            super(AdamW, self).__init__(params, defaults)
+        
+        @torch.no_grad() # Disable gradient tracking (optimizer update shouldn't be part of the autograd graph)
+        def step(self, closure=None):
+            
+            # TODO: Revisit how to deal with the sample batch requirement 
 
+            for group in self.param_groups: 
+                # Get the hype-parameter for each parameter group 
+                lr = group["lr"]
+                beta1, beta2 = group["betas"]
+                eps = group["eps"]
+                weight_decay = group["weight_decay"]
+                
+                # p is one tensor of the parameters, e.g. weights or bias in the feed-forward network
+                for p in group["params"]:
+                    if p.grad is None: 
+                        # Skip parameters that didn't get a gradient
+                        continue
+                    
+                    # Retrieve optimizer state for this parameter tensor
+                    state = self.state[p]
+                    
+                    # Initialize the state if the first time seeing this parameter 
+                    if len(state) == 0:
+                        state["step"] = 0 
+                        # Initialize the first momentum 
+                        state["m"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                        # Initialize the second momentum 
+                        state["v"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                        
+                    # Update the step 
+                    state["step"] += 1
+                    t = state["step"]
+                    m, v = state["m"], state["v"]
+                    
+                    m = m.mul_(beta1).add_(p.grad, alpha=1 - beta1)
+                    v = v.mul_(beta2).addcmul_(p.grad, p.grad, value= 1 - beta2)
+                    
+                    alpha = lr * math.sqrt(1 - beta2 ** t) / (1 - beta1 ** t)
+                    denom = torch.sqrt(v) + eps
+                    p.add_(-alpha * m / denom)
+                    
+                    w = -lr * p * weight_decay
+                    p.add_(w)
+                    
+    return AdamW
+                    
 
 def run_get_lr_cosine_schedule(
     it: int,
