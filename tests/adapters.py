@@ -24,6 +24,7 @@ from cs336_basics.llm_transformer import (
     TransformerBlock, 
     TransformerLM
 )
+import numpy as np
 
 
 def run_linear(
@@ -611,7 +612,12 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    grads = torch.cat([p.grad.view(-1) for p in parameters if p.grad is not None])
+    l2_norm = torch.norm(grads, p=2)
+    if l2_norm > max_l2_norm:
+        for p in parameters:
+            if p.grad is not None:
+                p.grad.mul_(max_l2_norm).div_(l2_norm + 1e-6)
 
 
 def get_adamw_cls() -> type[torch.optim.Optimizer]:
@@ -707,7 +713,17 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    if it < warmup_iters:
+        lr = (it / warmup_iters) * max_learning_rate
+    elif it <= cosine_cycle_iters:
+        t = it - warmup_iters
+        T = cosine_cycle_iters - warmup_iters
+        cos_value = np.cos(np.pi * t / T)
+        lr = min_learning_rate + 0.5 * (max_learning_rate - min_learning_rate) * (1 + cos_value)
+    else:
+        lr = min_learning_rate
+        
+    return lr
 
 
 def run_save_checkpoint(
